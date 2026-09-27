@@ -73,8 +73,8 @@ module.exports = async (req, res) => {
 
   // --- Step 3: grant the entitlement in Firestore ---
   try {
-    if (productType === 'subscription_pro') {
-      await db.collection('profiles').doc(uid).set(
+        if (productType.startsWith('subscription_pro')) {
+      await db.collection('users').doc(uid).set(
         { subscriptionTier: 'pro' },
         { merge: true },
       );

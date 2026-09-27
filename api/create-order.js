@@ -1,14 +1,14 @@
 const Razorpay = require('razorpay');
 
 // Amounts here are hardcoded server-side on purpose — never trust an
-// amount sent from the app, or anyone could pay ₹1 for a ₹49 feature.
+// amount sent from the app, or anyone could pay less than the real price.
 const PRICES = {
   featured_listing: 4900, // in paise: ₹49.00
-  subscription_pro: 9900, // in paise: ₹99.00 (adjust to your real price)
+  subscription_pro_monthly: 19900, // in paise: ₹199.00
+  subscription_pro_yearly: 149900, // in paise: ₹1,499.00
 };
 
 module.exports = async (req, res) => {
-  // Basic CORS so your Flutter app (or any client) can call this.
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -38,9 +38,6 @@ module.exports = async (req, res) => {
     const order = await razorpay.orders.create({
       amount: PRICES[productType],
       currency: 'INR',
-      // notes travel with the order and come back in the webhook/verify
-      // step, so we know what was actually purchased without trusting
-      // anything the client claims at verification time.
       notes: {
         uid,
         productType,
@@ -51,7 +48,7 @@ module.exports = async (req, res) => {
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      keyId: process.env.RAZORPAY_KEY_ID, // safe to expose - it's public
+      keyId: process.env.RAZORPAY_KEY_ID,
     });
   } catch (err) {
     console.error('create-order error:', err);
