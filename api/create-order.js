@@ -20,13 +20,16 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { productType, uid } = req.body || {};
+  const { productType, uid, entityCollection, entityId } = req.body || {};
 
   if (!productType || !PRICES[productType]) {
     return res.status(400).json({ error: 'Invalid or missing productType' });
   }
   if (!uid) {
     return res.status(400).json({ error: 'Missing uid' });
+  }
+  if (productType === 'featured_listing' && (!entityCollection || !entityId)) {
+    return res.status(400).json({ error: 'Missing entityCollection or entityId for featured listing' });
   }
 
   const razorpay = new Razorpay({
@@ -41,6 +44,7 @@ module.exports = async (req, res) => {
       notes: {
         uid,
         productType,
+        ...(productType === 'featured_listing' ? { entityCollection, entityId } : {}),
       },
     });
 
