@@ -19,7 +19,7 @@
   },
   "homepage": "https://github.com/supportjansetu-cyber/jansetu-payments#readme",
   "dependencies": {
-    "firebase-admin": "^14.5.0",
+    "firebase-admin": "^12.7.0",
     "razorpay": "^2.9.8"
   }
 }
