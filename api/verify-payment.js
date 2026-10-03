@@ -13,6 +13,15 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// How long each subscription product lasts. Keep in sync with PRICES in
+// create-order.js.
+const SUBSCRIPTION_PLANS = {
+  subscription_pro_monthly: { plan: 'monthly', days: 30 },
+  subscription_pro_yearly: { plan: 'yearly', days: 365 },
+};
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -73,11 +82,64 @@ module.exports = async (req, res) => {
 
   // --- Step 3: grant the entitlement in Firestore ---
   try {
-        if (productType.startsWith('subscription_pro')) {
-      await db.collection('users').doc(uid).set(
-        { subscriptionTier: 'pro' },
-        { merge: true },
-      );
+    const subscription = SUBSCRIPTION_PLANS[productType];
+
+    if (subscription) {
+      const userRef = db.collection('users').doc(uid);
+      // One doc per payment, used to make this endpoint idempotent: if the
+      // app retries verification for the same payment, we must not extend
+      // the user's Pro period a second time. Clients can never read or
+      // write this collection (no rule matches it, so it is default-deny;
+      // the Admin SDK bypasses rules).
+      const paymentRef = db.collection('processedPayments').doc(razorpay_payment_id);
+
+      await db.runTransaction(async (tx) => {
+        const paymentSnap = await tx.get(paymentRef);
+        if (paymentSnap.exists) return; // already applied
+
+        const userSnap = await tx.get(userRef);
+        const current = userSnap.exists ? userSnap.data() : {};
+
+        const now = Date.now();
+        const currentUntilMs =
+          current.proUntil && typeof current.proUntil.toMillis === 'function'
+            ? current.proUntil.toMillis()
+            : 0;
+        const stillActive = currentUntilMs > now;
+
+        // Renewing while still Pro stacks onto the existing end date
+        // instead of throwing away the time already paid for.
+        const startMs = stillActive ? currentUntilMs : now;
+        const newUntil = admin.firestore.Timestamp.fromMillis(
+          startMs + subscription.days * DAY_MS,
+        );
+
+        // A user who is still on a yearly plan keeps the 'yearly' label
+        // even if they top up with a monthly purchase.
+        const newPlan =
+          stillActive && current.subscriptionPlan === 'yearly'
+            ? 'yearly'
+            : subscription.plan;
+
+        tx.set(
+          userRef,
+          {
+            subscriptionTier: 'pro',
+            // Kept for the PRO badge, which still reads this field. The
+            // app will start checking proUntil instead in a later step.
+            isPremium: true,
+            subscriptionPlan: newPlan,
+            proUntil: newUntil,
+          },
+          { merge: true },
+        );
+        tx.set(paymentRef, {
+          uid,
+          productType,
+          orderId: razorpay_order_id,
+          appliedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
     } else if (productType === 'featured_listing') {
       if (!entityCollection || !entityId) {
         return res.status(400).json({ error: 'Missing listing to feature' });
