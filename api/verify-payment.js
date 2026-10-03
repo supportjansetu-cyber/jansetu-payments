@@ -15,11 +15,19 @@ const db = admin.firestore();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Free Featured listings granted with each yearly purchase. Spent through
+// api/use-featured-credit.js, only while the Pro plan is active.
+const YEARLY_FEATURED_CREDITS = 3;
+
 // How long each subscription product lasts. Keep in sync with PRICES in
 // create-order.js.
 const SUBSCRIPTION_PLANS = {
-  subscription_pro_monthly: { plan: 'monthly', days: 30 },
-  subscription_pro_yearly: { plan: 'yearly', days: 365 },
+  subscription_pro_monthly: { plan: 'monthly', days: 30, featuredCredits: 0 },
+  subscription_pro_yearly: {
+    plan: 'yearly',
+    days: 365,
+    featuredCredits: YEARLY_FEATURED_CREDITS,
+  },
 };
 
 module.exports = async (req, res) => {
@@ -88,9 +96,9 @@ module.exports = async (req, res) => {
       const userRef = db.collection('users').doc(uid);
       // One doc per payment, used to make this endpoint idempotent: if the
       // app retries verification for the same payment, we must not extend
-      // the user's Pro period a second time. Clients can never read or
-      // write this collection (no rule matches it, so it is default-deny;
-      // the Admin SDK bypasses rules).
+      // the user's Pro period (or grant credits) a second time. Clients can
+      // never read or write this collection (no rule matches it, so it is
+      // default-deny; the Admin SDK bypasses rules).
       const paymentRef = db.collection('processedPayments').doc(razorpay_payment_id);
 
       await db.runTransaction(async (tx) => {
@@ -121,18 +129,24 @@ module.exports = async (req, res) => {
             ? 'yearly'
             : subscription.plan;
 
-        tx.set(
-          userRef,
-          {
-            subscriptionTier: 'pro',
-            // Kept for the PRO badge, which still reads this field. The
-            // app will start checking proUntil instead in a later step.
-            isPremium: true,
-            subscriptionPlan: newPlan,
-            proUntil: newUntil,
-          },
-          { merge: true },
-        );
+        const update = {
+          subscriptionTier: 'pro',
+          // Kept for any old reader of this field. The app now checks
+          // proUntil instead.
+          isPremium: true,
+          subscriptionPlan: newPlan,
+          proUntil: newUntil,
+        };
+
+        // Yearly purchases add free Featured credits on top of whatever
+        // the user has left.
+        if (subscription.featuredCredits > 0) {
+          update.featuredCredits = admin.firestore.FieldValue.increment(
+            subscription.featuredCredits,
+          );
+        }
+
+        tx.set(userRef, update, { merge: true });
         tx.set(paymentRef, {
           uid,
           productType,
@@ -157,4 +171,4 @@ module.exports = async (req, res) => {
     console.error('verify-payment: Firestore write failed:', err);
     return res.status(500).json({ error: 'Payment verified but failed to apply' });
   }
-};
+};s
