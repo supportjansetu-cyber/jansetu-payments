@@ -1,34 +1,6 @@
 const crypto = require('crypto');
 const Razorpay = require('razorpay');
-const admin = require('firebase-admin');
-
-// Initialize the Firebase Admin SDK once per cold start, using the
-// service account JSON stored as a Vercel environment variable (never
-// committed to Git, never sent to the client).
-if (!admin.apps.length) {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
-}
-const db = admin.firestore();
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-// Free Featured listings granted with each yearly purchase. Spent through
-// api/use-featured-credit.js, only while the Pro plan is active.
-const YEARLY_FEATURED_CREDITS = 3;
-
-// How long each subscription product lasts. Keep in sync with PRICES in
-// create-order.js.
-const SUBSCRIPTION_PLANS = {
-  subscription_pro_monthly: { plan: 'monthly', days: 30, featuredCredits: 0 },
-  subscription_pro_yearly: {
-    plan: 'yearly',
-    days: 365,
-    featuredCredits: YEARLY_FEATURED_CREDITS,
-  },
-};
+const { applyPayment, PaymentApplyError } = require('../lib/apply-payment');
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -82,92 +54,18 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: 'Could not verify order' });
   }
 
-  const { uid, productType, entityCollection, entityId } = order.notes || {};
-
-  if (!uid || !productType) {
-    return res.status(400).json({ error: 'Order is missing required metadata' });
-  }
-
-  // --- Step 3: grant the entitlement in Firestore ---
+  // --- Step 3: grant the entitlement (shared with the webhook) ---
   try {
-    const subscription = SUBSCRIPTION_PLANS[productType];
-
-    if (subscription) {
-      const userRef = db.collection('users').doc(uid);
-      // One doc per payment, used to make this endpoint idempotent: if the
-      // app retries verification for the same payment, we must not extend
-      // the user's Pro period (or grant credits) a second time. Clients can
-      // never read or write this collection (no rule matches it, so it is
-      // default-deny; the Admin SDK bypasses rules).
-      const paymentRef = db.collection('processedPayments').doc(razorpay_payment_id);
-
-      await db.runTransaction(async (tx) => {
-        const paymentSnap = await tx.get(paymentRef);
-        if (paymentSnap.exists) return; // already applied
-
-        const userSnap = await tx.get(userRef);
-        const current = userSnap.exists ? userSnap.data() : {};
-
-        const now = Date.now();
-        const currentUntilMs =
-          current.proUntil && typeof current.proUntil.toMillis === 'function'
-            ? current.proUntil.toMillis()
-            : 0;
-        const stillActive = currentUntilMs > now;
-
-        // Renewing while still Pro stacks onto the existing end date
-        // instead of throwing away the time already paid for.
-        const startMs = stillActive ? currentUntilMs : now;
-        const newUntil = admin.firestore.Timestamp.fromMillis(
-          startMs + subscription.days * DAY_MS,
-        );
-
-        // A user who is still on a yearly plan keeps the 'yearly' label
-        // even if they top up with a monthly purchase.
-        const newPlan =
-          stillActive && current.subscriptionPlan === 'yearly'
-            ? 'yearly'
-            : subscription.plan;
-
-        const update = {
-          subscriptionTier: 'pro',
-          // Kept for any old reader of this field. The app now checks
-          // proUntil instead.
-          isPremium: true,
-          subscriptionPlan: newPlan,
-          proUntil: newUntil,
-        };
-
-        // Yearly purchases add free Featured credits on top of whatever
-        // the user has left.
-        if (subscription.featuredCredits > 0) {
-          update.featuredCredits = admin.firestore.FieldValue.increment(
-            subscription.featuredCredits,
-          );
-        }
-
-        tx.set(userRef, update, { merge: true });
-        tx.set(paymentRef, {
-          uid,
-          productType,
-          orderId: razorpay_order_id,
-          appliedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-      });
-    } else if (productType === 'featured_listing') {
-      if (!entityCollection || !entityId) {
-        return res.status(400).json({ error: 'Missing listing to feature' });
-      }
-      await db.collection(entityCollection).doc(entityId).set(
-        { isFeatured: true },
-        { merge: true },
-      );
-    } else {
-      return res.status(400).json({ error: 'Unknown productType' });
-    }
-
+    await applyPayment({
+      paymentId: razorpay_payment_id,
+      orderId: razorpay_order_id,
+      notes: order.notes,
+    });
     return res.status(200).json({ success: true });
   } catch (err) {
+    if (err instanceof PaymentApplyError) {
+      return res.status(err.httpStatus).json({ error: err.message });
+    }
     console.error('verify-payment: Firestore write failed:', err);
     return res.status(500).json({ error: 'Payment verified but failed to apply' });
   }
