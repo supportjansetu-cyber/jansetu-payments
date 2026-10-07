@@ -171,4 +171,4 @@ module.exports = async (req, res) => {
     console.error('verify-payment: Firestore write failed:', err);
     return res.status(500).json({ error: 'Payment verified but failed to apply' });
   }
-};s
+};
