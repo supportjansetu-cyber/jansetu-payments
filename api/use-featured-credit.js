@@ -14,6 +14,9 @@ const db = admin.firestore();
 // must match the caller.
 const FEATURABLE_COLLECTIONS = ['gigs', 'workers', 'local_businesses'];
 
+// Must match FEATURED_DAYS in lib/apply-payment.js.
+const FEATURED_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
 // Thrown inside the transaction to return a clean HTTP error to the app.
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -85,7 +88,15 @@ module.exports = async (req, res) => {
       if (entity.postedBy !== uid) {
         throw new HttpError(403, 'not_owner', 'You can only feature your own listing');
       }
-      if (entity.isFeatured === true) {
+      // Already featured only while the end date is in the future. Older
+      // listings featured before expiry existed have no end date, so they
+      // still count as featured for now.
+      const featuredUntilMs =
+        entity.featuredUntil && typeof entity.featuredUntil.toMillis === 'function'
+          ? entity.featuredUntil.toMillis()
+          : 0;
+      const hasEndDate = featuredUntilMs > 0;
+      if (entity.isFeatured === true && (!hasEndDate || featuredUntilMs > Date.now())) {
         throw new HttpError(409, 'already_featured', 'Listing is already featured');
       }
 
@@ -104,7 +115,12 @@ module.exports = async (req, res) => {
       }
 
       tx.update(userRef, { featuredCredits: admin.firestore.FieldValue.increment(-1) });
-      tx.update(entityRef, { isFeatured: true });
+      tx.update(entityRef, {
+        isFeatured: true,
+        featuredUntil: admin.firestore.Timestamp.fromMillis(
+          Date.now() + FEATURED_DAYS * DAY_MS,
+        ),
+      });
       return credits - 1;
     });
 
